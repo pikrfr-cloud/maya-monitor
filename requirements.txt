@@ -2,3 +2,4 @@ aiohttp==3.9.5
 python-telegram-bot==21.3
 apscheduler==3.10.4
 python-dotenv==1.0.1
+feedparser==6.0.11
