@@ -335,7 +335,10 @@ JSON בלבד:
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
             timeout=aiohttp.ClientTimeout(total=60)) as r:
-            if r.status != 200: return None
+            if r.status != 200:
+                err = await r.text()
+                logger.error(f"Claude HTTP {r.status}: {err[:300]}")
+                return None
             c = (await r.json()).get("content", [])
             return pj(c[0]["text"]) if c else None
     except Exception as e:
@@ -600,6 +603,8 @@ async def main():
 
     state, tg = State(), TG()
     logger.info(f"📊 Starting Maya Monitor v4 — {len(MAYA_IDS)} companies, {len(state.seen)} seen")
+    logger.info(f"  GEMINI_API_KEY: {'SET (' + GEMINI_API_KEY[:8] + '...)' if GEMINI_API_KEY else 'MISSING'}")
+    logger.info(f"  ANTHROPIC_API_KEY: {'SET (' + ANTHROPIC_API_KEY[:8] + '...)' if ANTHROPIC_API_KEY else 'MISSING'}")
 
     await tg.startup(len(MAYA_IDS))
 
