@@ -229,22 +229,65 @@ def parse_report(item, company_name, company_id):
 
 
 async def fetch_report_content(session, report):
-    """Try to fetch the actual report text."""
-    if not report.get("id"):
+    """Get report content using headless browser (Playwright)."""
+    report_id = report.get("id", "")
+    if not report_id:
         return ""
+
+    url = f"https://maya.tase.co.il/reports/details/{report_id}"
+    logger.info(f"  Fetching report content: {url}")
+
     try:
-        url = f"{MAYA_API}/report/details/{report['id']}"
-        async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            if r.status == 200:
-                data = await r.json()
-                if isinstance(data, dict):
-                    for f in ["Body", "body", "Content", "content", "Text", "text", "HtmlBody"]:
-                        if data.get(f):
-                            text = re.sub(r'<[^>]+>', ' ', str(data[f]))
-                            return re.sub(r'\s+', ' ', text).strip()[:5000]
-    except Exception:
-        pass
-    return ""
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            # Wait for content to render
+            await page.wait_for_timeout(3000)
+
+            # Extract text content from the report
+            content = await page.evaluate("""() => {
+                // Try different selectors Maya might use
+                const selectors = [
+                    '.report-content', '.report-body', '.report-text',
+                    '.maya-report', '.document-content', '.filing-content',
+                    '[class*="report"]', '[class*="content"]',
+                    'article', '.main-content', '#content',
+                    '.ng-star-inserted'
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText && el.innerText.length > 100) {
+                        return el.innerText;
+                    }
+                }
+                // Fallback: get all visible text from body
+                return document.body.innerText;
+            }""")
+
+            await browser.close()
+
+            if content and len(content) > 50:
+                # Clean up
+                content = content.strip()
+                # Remove navigation/footer noise
+                lines = content.split('\n')
+                # Keep lines that are actual content (not menu items)
+                good_lines = [l for l in lines if len(l.strip()) > 20]
+                content = '\n'.join(good_lines)
+                logger.info(f"  Content extracted: {len(content)} chars")
+                return content[:6000]
+            else:
+                logger.warning(f"  No content extracted from page")
+                return ""
+
+    except ImportError:
+        logger.error("Playwright not installed! Run: pip install playwright && playwright install chromium")
+        return ""
+    except Exception as e:
+        logger.error(f"  Playwright error: {e}")
+        return ""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -315,7 +358,10 @@ async def claude_analyze(session, report, content):
 תאריך: {report.get('date','?')}
 
 ══ תוכן הדיווח ══
-{content[:4500] if content else "(אין תוכן מלא — נתח על סמך הכותרת והקונטקסט שלך על החברה)"}
+{content[:4500] if content else "(אין תוכן מלא זמין)"}
+
+══ הנחיות קריטיות ══
+{"⚠️ אין תוכן מלא. אל תמציא נתונים! כתוב רק: 'לא ניתן לנתח — אין גישה לתוכן המלא של הדיווח. יש לעיין בקישור.' ותן רק הערכה כללית קצרה על סמך הכותרת." if not content else "יש לך את התוכן המלא. נתח אותו לעומק."}
 
 ══ הנחיות ══
 נתח כאנליסט מקצועי ברמה הגבוהה ביותר:
