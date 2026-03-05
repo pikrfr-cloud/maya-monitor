@@ -91,12 +91,21 @@ SKIP_KW = [
     "פרוטוקול אסיפה",
     "הזמנה לאסיפה",
     "תוצאות אסיפה",
+    "צו עיכוב",
+    "עיכוב הליכים",
+    "הודעה על הקצאה",
+    "דוח הצעת מדף",
+    "נושאי משרה ליום",
+    "הודעה בהתאם לתקנה",
+    "עדכון תשקיף",
+    "מכתב התחייבות",
 ]
 
 def should_skip(title):
     """Skip boring/routine reports."""
-    t = title.lower() if title else ""
-    return any(kw in t for kw in SKIP_KW)
+    if not title:
+        return True
+    return any(kw in title for kw in SKIP_KW)
 
 def is_interesting(title):
     """Reports that deserve full AI analysis."""
@@ -109,7 +118,7 @@ def is_interesting(title):
         "פרויקט", "זכייה", "חוזה", "ייצוא", "ייבוא",
         "אזהרת רווח", "profit warning",
     ]
-    t = title.lower() if title else ""
+    t = title if title else ""
     return any(kw in t for kw in INTERESTING_KW) or is_financial(title)
 
 FINANCIAL_KW = [
@@ -135,7 +144,7 @@ for q in ["httpx", "telegram", "apscheduler"]:
 
 def now_s(): return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 def now_u(): return datetime.now(timezone.utc)
-def is_financial(title): return any(k.lower() in title.lower() for k in FINANCIAL_KW)
+def is_financial(title): return any(k in (title or "") for k in FINANCIAL_KW)
 def rhash(r):
     return hashlib.md5(f"{r.get('id','')}{r.get('title','')[:50]}{r.get('date','')}".encode()).hexdigest()[:12]
 
@@ -527,19 +536,22 @@ async def scan():
                             content = await fetch_report_content(s, rp)
                             logger.info(f"  Content: {len(content)} chars")
 
-                            # Choose AI engine
-                            use_claude = is_financial(rp["title"])
-                            if use_claude and ANTHROPIC_API_KEY:
+                            # Try Gemini first (free), Claude as fallback
+                            ai = None
+                            engine = "gemini"
+
+                            if GEMINI_API_KEY:
+                                ai = await gemini_analyze(s, rp, content)
+                                state.tick("gemini")
+
+                            if not ai and ANTHROPIC_API_KEY:
+                                logger.info(f"  Gemini failed, trying Claude...")
                                 ai = await claude_analyze(s, rp, content)
                                 state.tick("claude")
                                 engine = "claude"
-                            else:
-                                ai = await gemini_analyze(s, rp, content)
-                                state.tick("gemini")
-                                engine = "gemini"
 
                             if ai:
-                                logger.info(f"  AI OK: {list(ai.keys())}")
+                                logger.info(f"  AI OK ({engine}): {list(ai.keys())}")
                                 await tg.report_alert(rp, ai, engine)
                             else:
                                 logger.warning(f"  AI FAILED — sending raw alert")
