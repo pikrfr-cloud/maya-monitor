@@ -220,12 +220,15 @@ async def gemini_analyze(session, report, content):
 
 {f"תוכן:{chr(10)}{content[:3000]}" if content else "(אין תוכן — נתח על סמך הכותרת)"}
 
+חשוב: תן גם תוכן ההודעה (מה כתוב בדיווח) וגם ניתוח משמעות ברמה גבוהה (מה זה אומר למשקיע).
+
 JSON בלבד (בלי backticks):
 {{
-    "summary": "סיכום (3-5 משפטים)",
-    "impact": "השפעה על המניה + הסבר (2 משפטים)",
-    "key_numbers": "מספרים מרכזיים אם יש",
-    "action": "המלצה (משפט)",
+    "content_summary": "מה כתוב בדיווח — תוכן עובדתי מפורט. מספרים, שמות, תאריכים, עובדות (4-6 משפטים)",
+    "analysis": "ניתוח משמעות ברמה גבוהה — מה זה אומר לחברה, למשקיעים, מה ההשלכות. זו הפרשנות שלך (4-6 משפטים)",
+    "impact": "השפעה צפויה על מחיר המניה + הסבר (2-3 משפטים)",
+    "key_numbers": "מספרים מרכזיים מהדיווח אם יש",
+    "action": "המלצה למשקיע (1-2 משפטים)",
     "importance": "גבוהה/בינונית/נמוכה",
     "direction": "עלייה/ירידה/יציבות"
 }}"""
@@ -254,15 +257,18 @@ async def claude_analyze(session, report, content):
 
 {f"תוכן:{chr(10)}{content[:4000]}" if content else "(אין תוכן — נתח על סמך הכותרת)"}
 
+חשוב: תן גם תוכן הדוח (מה כתוב) וגם ניתוח משמעות ברמה גבוהה (מה זה אומר).
+
 JSON בלבד:
 {{
-    "summary": "סיכום (4-6 משפטים)",
-    "financials": {{"revenue":"הכנסות","profit_loss":"רווח/הפסד","margins":"שולי רווח","cash_flow":"תזרים","comparison":"השוואה"}},
+    "content_summary": "מה כתוב בדוח — תוכן עובדתי מפורט: מספרים, נתונים, עובדות מרכזיות (5-8 משפטים)",
+    "analysis": "ניתוח משמעות ברמה גבוהה — מה זה אומר לחברה ולמשקיעים, מגמות, סיכונים, הזדמנויות (5-8 משפטים)",
+    "financials": {{"revenue":"הכנסות","profit_loss":"רווח/הפסד","margins":"שולי רווח","cash_flow":"תזרים","comparison":"השוואה לתקופה קודמת"}},
     "strengths": ["חוזקה 1","חוזקה 2"],
     "risks": ["סיכון 1","סיכון 2"],
-    "impact": "השפעה על המניה (3-4 משפטים)",
+    "impact": "השפעה צפויה על מחיר המניה (3-4 משפטים)",
     "direction": "עלייה/ירידה/יציבות",
-    "action": "המלצה (2-3 משפטים)",
+    "action": "המלצה למשקיע (2-3 משפטים)",
     "importance": "גבוהה/בינונית/נמוכה",
     "confidence": "גבוהה/בינונית/נמוכה"
 }}"""
@@ -370,29 +376,38 @@ class TG:
 
         msg = (f"📊 דיווח חדש {ie}\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
                f"🏢 {rp['company']}\n📋 {rp['title']}\n"
-               f"📅 {rp.get('date', '—')}\n{et}\n\n")
+               f"📅 {rp.get('date', '—')}\n"
+               f"🔗 {rp.get('url', '—')}\n"
+               f"{et}\n\n")
 
-        if ai.get("summary"):
-            msg += f"📝 סיכום:\n{ai['summary']}\n\n"
-        if ai.get("impact"):
-            msg += f"{de} השפעה:\n{ai['impact']}\n\n"
+        # Content: what the report says (facts)
+        if ai.get("content_summary"):
+            msg += f"📄 תוכן הדיווח:\n{ai['content_summary']}\n\n"
+
         if ai.get("key_numbers"):
-            msg += f"🔢 מספרים: {ai['key_numbers']}\n\n"
+            msg += f"🔢 מספרים מרכזיים:\n{ai['key_numbers']}\n\n"
 
+        # Analysis: what it means (interpretation)
+        if ai.get("analysis"):
+            msg += f"🧠 ניתוח משמעות:\n{ai['analysis']}\n\n"
+
+        if ai.get("impact"):
+            msg += f"{de} השפעה על המניה:\n{ai['impact']}\n\n"
+
+        # Claude deep analysis extras
         if engine == "claude":
             fin = ai.get("financials", {})
             labels = {"revenue": "הכנסות", "profit_loss": "רווח/הפסד", "margins": "שולי רווח",
                       "cash_flow": "תזרים", "comparison": "השוואה"}
             fl = [f"  • {labels.get(k,k)}: {v}" for k, v in fin.items() if v and "אין" not in str(v)]
-            if fl: msg += "💰 נתונים:\n" + "\n".join(fl) + "\n\n"
+            if fl: msg += "💰 נתונים פיננסיים:\n" + "\n".join(fl) + "\n\n"
             for tag, label, emoji in [("strengths", "💪 חוזקות", "✅"), ("risks", "⚠️ סיכונים", "🔸")]:
                 lst = ai.get(tag, [])
                 if lst: msg += f"{label}:\n" + "\n".join([f"  {emoji} {x}" for x in lst]) + "\n\n"
 
         if ai.get("action"):
-            msg += f"💡 המלצה: {ai['action']}\n\n"
-        if rp.get("url"):
-            msg += f"🔗 {rp['url']}\n"
+            msg += f"💡 המלצה:\n{ai['action']}\n\n"
+
         msg += "━━━━━━━━━━━━━━━━━━━━━━"
         await self.send(msg)
 
