@@ -78,6 +78,40 @@ MAYA_IDS = {
     # רגא שרותים — not found in Maya scan
 }
 
+# Reports to SKIP (boring, routine — no AI, no notification)
+SKIP_KW = [
+    "החזקות בעלי עניין",
+    "שינוי החזקות",
+    "החזקות עניין",
+    "הודעה על שיעבוד",
+    "דוח חודשי",
+    "הודעה בדבר כינוס אסיפה",
+    "מינוי רואה חשבון",
+    "אישור דוחות כספיים",
+    "פרוטוקול אסיפה",
+    "הזמנה לאסיפה",
+    "תוצאות אסיפה",
+]
+
+def should_skip(title):
+    """Skip boring/routine reports."""
+    t = title.lower() if title else ""
+    return any(kw in t for kw in SKIP_KW)
+
+def is_interesting(title):
+    """Reports that deserve full AI analysis."""
+    INTERESTING_KW = [
+        "עסקה", "הסכם", "רכישה", "מיזוג", "מכירה",
+        "תביעה", "הנפקה", "הצעה", "אירוע", "מהותי",
+        "התקשרות", "הזמנה", "פיתוח", "אישור", "שיתוף פעולה",
+        "רווח", "הפסד", "גידול", "ירידה", "הכנסות",
+        "חלוקת דיבידנד", "הקצאה", "תוצאות",
+        "פרויקט", "זכייה", "חוזה", "ייצוא", "ייבוא",
+        "אזהרת רווח", "profit warning",
+    ]
+    t = title.lower() if title else ""
+    return any(kw in t for kw in INTERESTING_KW) or is_financial(title)
+
 FINANCIAL_KW = [
     "דוח כספי", "דוחות כספיים", "תוצאות כספיות", "רבעון",
     "דוח תקופתי", "דוח שנתי", "מאזן", "רווח והפסד",
@@ -237,13 +271,25 @@ JSON בלבד (בלי backticks):
         async with session.post(url, json={"contents": [{"parts": [{"text": prompt}]}]},
                                 timeout=aiohttp.ClientTimeout(total=45)) as r:
             if r.status != 200:
-                logger.error(f"Gemini {r.status}: {(await r.text())[:200]}")
+                err = await r.text()
+                logger.error(f"Gemini HTTP {r.status}: {err[:300]}")
                 return None
             data = await r.json()
-            text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            return pj(text)
+            candidates = data.get("candidates", [])
+            if not candidates:
+                logger.error(f"Gemini: no candidates. Response: {json.dumps(data, ensure_ascii=False)[:300]}")
+                return None
+            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            if not text:
+                logger.error(f"Gemini: empty text. Candidate: {json.dumps(candidates[0], ensure_ascii=False)[:300]}")
+                return None
+            logger.info(f"  Gemini raw response: {text[:150]}...")
+            result = pj(text)
+            if not result:
+                logger.error(f"Gemini: JSON parse failed. Text: {text[:300]}")
+            return result
     except Exception as e:
-        logger.error(f"Gemini: {e}"); return None
+        logger.error(f"Gemini error: {e}"); return None
 
 
 async def claude_analyze(session, report, content):
@@ -458,9 +504,14 @@ async def scan():
 
                         state.mark(h)
 
+                        # Skip boring reports entirely
+                        if should_skip(rp["title"]):
+                            logger.debug(f"  SKIP: {rp['title'][:50]}")
+                            continue
+
                         # First scan: send 1 demo, skip rest
                         if is_first:
-                            if not demo_sent:
+                            if not demo_sent and is_interesting(rp["title"]):
                                 demo_sent = True
                                 logger.info(f"📋 DEMO: {company_name} — {rp['title']} (id={rp.get('id','')})")
                                 # Fall through to AI analysis below
@@ -470,26 +521,31 @@ async def scan():
                         new_c += 1
                         logger.info(f"📋 NEW: {company_name} — {rp['title']} (id={rp.get('id','')})")
 
-                        # Fetch content
-                        content = await fetch_report_content(s, rp)
-                        logger.info(f"  Content: {len(content)} chars")
+                        # Only run AI on interesting reports
+                        if is_interesting(rp["title"]):
+                            # Fetch content
+                            content = await fetch_report_content(s, rp)
+                            logger.info(f"  Content: {len(content)} chars")
 
-                        # Choose AI engine
-                        use_claude = is_financial(rp["title"])
-                        if use_claude and ANTHROPIC_API_KEY:
-                            ai = await claude_analyze(s, rp, content)
-                            state.tick("claude")
-                            engine = "claude"
-                        else:
-                            ai = await gemini_analyze(s, rp, content)
-                            state.tick("gemini")
-                            engine = "gemini"
+                            # Choose AI engine
+                            use_claude = is_financial(rp["title"])
+                            if use_claude and ANTHROPIC_API_KEY:
+                                ai = await claude_analyze(s, rp, content)
+                                state.tick("claude")
+                                engine = "claude"
+                            else:
+                                ai = await gemini_analyze(s, rp, content)
+                                state.tick("gemini")
+                                engine = "gemini"
 
-                        if ai:
-                            logger.info(f"  AI OK: {list(ai.keys())}")
-                            await tg.report_alert(rp, ai, engine)
+                            if ai:
+                                logger.info(f"  AI OK: {list(ai.keys())}")
+                                await tg.report_alert(rp, ai, engine)
+                            else:
+                                logger.warning(f"  AI FAILED — sending raw alert")
+                                await tg.raw_alert(rp)
                         else:
-                            logger.warning(f"  AI FAILED — sending raw alert")
+                            # Not interesting enough for AI, just notify
                             await tg.raw_alert(rp)
 
                         await asyncio.sleep(1)
