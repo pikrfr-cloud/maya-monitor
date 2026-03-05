@@ -304,33 +304,50 @@ JSON בלבד (בלי backticks):
 async def claude_analyze(session, report, content):
     if not ANTHROPIC_API_KEY: return None
     prompt = f"""[{now_s()}]
-אנליסט פיננסי בכיר. נתח דוח כספי.
 
+אתה אנליסט השקעות בכיר בבית השקעות מוביל בישראל, עם 15+ שנות ניסיון בשוק ההון הישראלי.
+אתה מנתח דיווח שפורסם במערכת מאי"ה (מערכת ההודעות של הבורסה לניירות ערך).
+
+══ פרטי הדיווח ══
 חברה: {report['company']}
 כותרת: {report['title']}
 סוג: {report.get('form_type','?')}
+תאריך: {report.get('date','?')}
 
-{f"תוכן:{chr(10)}{content[:4000]}" if content else "(אין תוכן — נתח על סמך הכותרת)"}
+══ תוכן הדיווח ══
+{content[:4500] if content else "(אין תוכן מלא — נתח על סמך הכותרת והקונטקסט שלך על החברה)"}
 
-חשוב: תן גם תוכן הדוח (מה כתוב) וגם ניתוח משמעות ברמה גבוהה (מה זה אומר).
+══ הנחיות ══
+נתח כאנליסט מקצועי ברמה הגבוהה ביותר:
+
+1. תוכן הדיווח: תמצת את העובדות — מה בדיוק מדווח, מספרים, שמות, תאריכים, סכומים
+2. ניתוח עומק: מה המשמעות האמיתית? למה זה חשוב? מה הרקע? מה ה-context?
+   - נתח את ההשלכות על מצב החברה, המאזן, תזרים המזומנים
+   - האם זה חד-פעמי או מגמה?
+   - איך זה משתלב עם דיווחים קודמים או מגמות בענף?
+3. השפעה על המניה: תן הערכה מנומקת — לא "חיובי" סתמי, אלא הסבר מעמיק
+4. הסתכלות קדימה: מה לצפות בהמשך? מתי נדע יותר? מה הטריגר הבא?
+5. המלצה: מה אנליסט היה אומר ללקוח שמחזיק את המניה?
+
+דבר כאנליסט שמגיש briefing לפורטפוליו מנג'ר. היה ספציפי, ישיר, מקצועי.
+אל תהיה גנרי — כל משפט צריך להוסיף ערך.
 
 JSON בלבד:
 {{
-    "content_summary": "מה כתוב בדוח — תוכן עובדתי מפורט: מספרים, נתונים, עובדות מרכזיות (5-8 משפטים)",
-    "analysis": "ניתוח משמעות ברמה גבוהה — מה זה אומר לחברה ולמשקיעים, מגמות, סיכונים, הזדמנויות (5-8 משפטים)",
-    "financials": {{"revenue":"הכנסות","profit_loss":"רווח/הפסד","margins":"שולי רווח","cash_flow":"תזרים","comparison":"השוואה לתקופה קודמת"}},
-    "strengths": ["חוזקה 1","חוזקה 2"],
-    "risks": ["סיכון 1","סיכון 2"],
-    "impact": "השפעה צפויה על מחיר המניה (3-4 משפטים)",
-    "direction": "עלייה/ירידה/יציבות",
-    "action": "המלצה למשקיע (2-3 משפטים)",
+    "content_summary": "מה בדיוק כתוב בדיווח — תמצית עובדתית חדה עם כל הפרטים המהותיים (5-8 משפטים)",
+    "deep_analysis": "ניתוח עומק ברמת אנליסט בכיר: משמעות, הקשר, השלכות, מגמות. זו הפרשנות המקצועית שלך (6-10 משפטים)",
+    "market_impact": "השפעה צפויה על מחיר המניה — כיוון, עוצמה, טווח זמן, ומדוע (3-5 משפטים)",
+    "forward_look": "מה לצפות בהמשך — אירועים, טריגרים, תאריכים חשובים (2-4 משפטים)",
+    "key_numbers": "כל המספרים המהותיים מהדיווח (סכומים, אחוזים, תאריכים)",
+    "bottom_line": "שורה תחתונה: מה אנליסט אומר ללקוח ב-2 משפטים",
     "importance": "גבוהה/בינונית/נמוכה",
+    "direction": "עלייה/ירידה/יציבות",
     "confidence": "גבוהה/בינונית/נמוכה"
 }}"""
     try:
         async with session.post(CLAUDE_API,
-            json={"model": CLAUDE_MODEL, "max_tokens": 2500,
-                  "system": "אנליסט פיננסי בכיר. עברית. JSON בלי backticks.",
+            json={"model": CLAUDE_MODEL, "max_tokens": 3000,
+                  "system": "אתה אנליסט השקעות בכיר עם מומחיות בשוק ההון הישראלי. אתה מנתח דיווחי חברות ממערכת מאי\"ה. הניתוח שלך ברמה של בית השקעות מוביל. עברית מקצועית. JSON בלבד ללא backticks.",
                   "messages": [{"role": "user", "content": prompt}]},
             headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
@@ -438,33 +455,38 @@ class TG:
                f"🔗 {rp.get('url', '—')}\n"
                f"{et}\n\n")
 
-        # Content: what the report says (facts)
+        # Content: what the report says
         if ai.get("content_summary"):
             msg += f"📄 תוכן הדיווח:\n{ai['content_summary']}\n\n"
 
         if ai.get("key_numbers"):
             msg += f"🔢 מספרים מרכזיים:\n{ai['key_numbers']}\n\n"
 
-        # Analysis: what it means (interpretation)
-        if ai.get("analysis"):
-            msg += f"🧠 ניתוח משמעות:\n{ai['analysis']}\n\n"
+        # Deep analysis (Claude)
+        if ai.get("deep_analysis"):
+            msg += f"🧠 ניתוח אנליסט:\n{ai['deep_analysis']}\n\n"
+        elif ai.get("analysis"):
+            msg += f"🧠 ניתוח:\n{ai['analysis']}\n\n"
 
-        if ai.get("impact"):
-            msg += f"{de} השפעה על המניה:\n{ai['impact']}\n\n"
+        # Market impact
+        if ai.get("market_impact"):
+            msg += f"{de} השפעה על המניה:\n{ai['market_impact']}\n\n"
+        elif ai.get("impact"):
+            msg += f"{de} השפעה:\n{ai['impact']}\n\n"
 
-        # Claude deep analysis extras
-        if engine == "claude":
-            fin = ai.get("financials", {})
-            labels = {"revenue": "הכנסות", "profit_loss": "רווח/הפסד", "margins": "שולי רווח",
-                      "cash_flow": "תזרים", "comparison": "השוואה"}
-            fl = [f"  • {labels.get(k,k)}: {v}" for k, v in fin.items() if v and "אין" not in str(v)]
-            if fl: msg += "💰 נתונים פיננסיים:\n" + "\n".join(fl) + "\n\n"
-            for tag, label, emoji in [("strengths", "💪 חוזקות", "✅"), ("risks", "⚠️ סיכונים", "🔸")]:
-                lst = ai.get(tag, [])
-                if lst: msg += f"{label}:\n" + "\n".join([f"  {emoji} {x}" for x in lst]) + "\n\n"
+        # Forward look
+        if ai.get("forward_look"):
+            msg += f"🔮 מבט קדימה:\n{ai['forward_look']}\n\n"
 
-        if ai.get("action"):
+        # Bottom line
+        if ai.get("bottom_line"):
+            msg += f"💡 שורה תחתונה:\n{ai['bottom_line']}\n\n"
+        elif ai.get("action"):
             msg += f"💡 המלצה:\n{ai['action']}\n\n"
+
+        conf = ai.get("confidence", "")
+        if conf:
+            msg += f"🎯 ביטחון: {conf}\n\n"
 
         msg += "━━━━━━━━━━━━━━━━━━━━━━"
         await self.send(msg)
@@ -539,19 +561,26 @@ async def scan():
                             content = await fetch_report_content(s, rp)
                             logger.info(f"  Content: {len(content)} chars")
 
-                            # Try Gemini first (free), Claude as fallback
-                            ai = None
-                            engine = "gemini"
-
-                            if GEMINI_API_KEY:
-                                ai = await gemini_analyze(s, rp, content)
-                                state.tick("gemini")
-
-                            if not ai and ANTHROPIC_API_KEY:
-                                logger.info(f"  Gemini failed, trying Claude...")
+                            # Demo always uses Claude for best quality
+                            if is_first and ANTHROPIC_API_KEY:
+                                logger.info(f"  DEMO mode — using Claude for analyst-level analysis")
                                 ai = await claude_analyze(s, rp, content)
                                 state.tick("claude")
                                 engine = "claude"
+                            else:
+                                # Normal: try Gemini first (free), Claude as fallback
+                                ai = None
+                                engine = "gemini"
+
+                                if GEMINI_API_KEY:
+                                    ai = await gemini_analyze(s, rp, content)
+                                    state.tick("gemini")
+
+                                if not ai and ANTHROPIC_API_KEY:
+                                    logger.info(f"  Gemini failed, trying Claude...")
+                                    ai = await claude_analyze(s, rp, content)
+                                    state.tick("claude")
+                                    engine = "claude"
 
                             if ai:
                                 logger.info(f"  AI OK ({engine}): {list(ai.keys())}")
