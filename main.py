@@ -163,7 +163,7 @@ def parse_report(item, company_name, company_id):
         return None
 
     date_str = item.get("PubDate") or item.get("PublishDate") or item.get("Date") or ""
-    report_id = str(item.get("RptCd") or item.get("Id") or item.get("id") or "")
+    report_id = str(item.get("RptCode") or item.get("RptCd") or item.get("Id") or item.get("id") or "")
     form_type = item.get("searchArrange") or item.get("FormType") or item.get("type") or ""
     comment = item.get("Comment") or ""
     has_eng = item.get("HasEngRpt", False)
@@ -436,7 +436,7 @@ tg = None
 async def scan():
     global state, tg
     state.scan_count += 1
-    is_first = state.scan_count == 1
+    is_first = len(state.seen) == 0
     demo_sent = False
     logger.info(f"═══ Scan #{state.scan_count} {'(FIRST — 1 demo + mark rest)' if is_first else ''} ═══")
     new_c = 0
@@ -448,6 +448,8 @@ async def scan():
                 try:
                     reports = await fetch_reports(s, company_name, company_id)
                     total_reports += len(reports)
+                    if reports:
+                        logger.info(f"  {company_name}: {len(reports)} reports (latest: {reports[0].get('title','')[:40]})")
 
                     for rp in reports:
                         h = rhash(rp)
@@ -460,16 +462,17 @@ async def scan():
                         if is_first:
                             if not demo_sent:
                                 demo_sent = True
-                                logger.info(f"📋 DEMO: {company_name} — {rp['title']}")
+                                logger.info(f"📋 DEMO: {company_name} — {rp['title']} (id={rp.get('id','')})")
                                 # Fall through to AI analysis below
                             else:
                                 continue
 
                         new_c += 1
-                        logger.info(f"📋 NEW: {company_name} — {rp['title']}")
+                        logger.info(f"📋 NEW: {company_name} — {rp['title']} (id={rp.get('id','')})")
 
                         # Fetch content
                         content = await fetch_report_content(s, rp)
+                        logger.info(f"  Content: {len(content)} chars")
 
                         # Choose AI engine
                         use_claude = is_financial(rp["title"])
@@ -483,8 +486,10 @@ async def scan():
                             engine = "gemini"
 
                         if ai:
+                            logger.info(f"  AI OK: {list(ai.keys())}")
                             await tg.report_alert(rp, ai, engine)
                         else:
+                            logger.warning(f"  AI FAILED — sending raw alert")
                             await tg.raw_alert(rp)
 
                         await asyncio.sleep(1)
@@ -518,8 +523,15 @@ async def scan():
 
 async def main():
     global state, tg
+
+    # Reset state if requested (add RESET_STATE=1 in Railway, then remove after deploy)
+    if os.getenv("RESET_STATE") == "1":
+        if os.path.exists(STATE_FILE):
+            os.remove(STATE_FILE)
+            logger.info("🔄 State reset — will re-scan and send 1 demo")
+
     state, tg = State(), TG()
-    logger.info(f"📊 Starting Maya Monitor v4 — {len(MAYA_IDS)} companies")
+    logger.info(f"📊 Starting Maya Monitor v4 — {len(MAYA_IDS)} companies, {len(state.seen)} seen")
 
     await tg.startup(len(MAYA_IDS))
 
