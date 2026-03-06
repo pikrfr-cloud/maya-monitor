@@ -352,22 +352,150 @@ async def fetch_pdf_text(session, pdf_url):
 
 
 # ═══════════════════════════════════════════════════════════
+# COMPANY PROFILES — read annual reports to know the company
+# ═══════════════════════════════════════════════════════════
+
+async def build_company_profiles(session):
+    """Read latest financial reports for each company and build profiles."""
+    profiles = {}
+    logger.info("🏗️ Building company profiles from financial reports...")
+
+    for name, cid in MAYA_IDS.items():
+        try:
+            # Get all reports
+            reports = await fetch_reports(session, name, cid)
+
+            # Find financial reports (דוח כספי, דוח תקופתי, דוח שנתי)
+            financial = [r for r in reports if is_financial(r.get("title", ""))]
+            if not financial:
+                logger.info(f"  {name}: no financial reports found, trying latest 3")
+                financial = reports[:3]
+
+            # Read the content of the 2 most recent financial reports
+            contents = []
+            for rp in financial[:2]:
+                content = await fetch_report_content(session, rp)
+                if content and len(content) > 100:
+                    contents.append(f"[{rp.get('title','')} — {rp.get('date','')[:10]}]\n{content[:3000]}")
+                await asyncio.sleep(0.3)
+
+            if not contents:
+                logger.info(f"  {name}: no content available for profile")
+                continue
+
+            all_content = "\n\n───\n\n".join(contents)
+
+            # Use Gemini (free) to build the profile
+            if GEMINI_API_KEY:
+                profile = await build_profile_gemini(session, name, all_content)
+            elif ANTHROPIC_API_KEY:
+                profile = await build_profile_claude(session, name, all_content)
+            else:
+                profile = None
+
+            if profile:
+                profiles[name] = profile
+                logger.info(f"  ✅ {name}: profile built ({len(profile)} chars)")
+            else:
+                logger.warning(f"  ❌ {name}: profile build failed")
+
+            await asyncio.sleep(0.5)
+
+        except Exception as e:
+            logger.error(f"  {name} profile error: {e}")
+
+    logger.info(f"Profiles built: {len(profiles)}/{len(MAYA_IDS)}")
+    return profiles
+
+
+async def build_profile_gemini(session, company_name, report_content):
+    """Use Gemini (free) to summarize company from its financial reports."""
+    prompt = f"""קרא את הדוחות הכספיים הבאים של חברת {company_name} ובנה פרופיל חברה תמציתי.
+
+══ דוחות ══
+{report_content[:5000]}
+
+══ הנחיות ══
+כתוב פרופיל חברה שאנליסט יכול להשתמש בו כרקע בזמן ניתוח דיווחים חדשים.
+כלול:
+1. מה החברה עושה (תחום פעילות, מוצרים/שירותים)
+2. מצב כספי אחרון (הכנסות, רווח/הפסד, מגמה)
+3. נתונים מרכזיים (מספר עובדים, שווקים, לקוחות עיקריים)
+4. מגמות ואתגרים עיקריים
+5. אירועים מהותיים אחרונים
+
+כתוב בעברית, תמציתי, 200-400 מילים. טקסט רגיל, לא JSON."""
+
+    try:
+        url = f"{GEMINI_API}/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        async with session.post(url, json={"contents": [{"parts": [{"text": prompt}]}]},
+                                timeout=aiohttp.ClientTimeout(total=60)) as r:
+            if r.status != 200:
+                logger.debug(f"Gemini profile {r.status}")
+                return None
+            data = await r.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    except Exception as e:
+        logger.debug(f"Gemini profile: {e}")
+    return None
+
+
+async def build_profile_claude(session, company_name, report_content):
+    """Fallback: use Claude to build profile."""
+    prompt = f"""קרא את הדוחות של {company_name} ובנה פרופיל חברה תמציתי (200-400 מילים).
+כלול: תחום פעילות, מצב כספי, מגמות, אתגרים, אירועים מהותיים.
+
+{report_content[:4000]}"""
+
+    try:
+        async with session.post(CLAUDE_API,
+            json={"model": CLAUDE_MODEL, "max_tokens": 1000,
+                  "system": "בנה פרופיל חברה תמציתי בעברית. טקסט רגיל.",
+                  "messages": [{"role": "user", "content": prompt}]},
+            headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=60)) as r:
+            if r.status != 200:
+                return None
+            c = (await r.json()).get("content", [])
+            return c[0]["text"] if c else None
+    except Exception as e:
+        logger.debug(f"Claude profile: {e}")
+    return None
+
+
+# ═══════════════════════════════════════════════════════════
 # AI ANALYSIS
 # ═══════════════════════════════════════════════════════════
 
-async def gemini_analyze(session, report, content):
+async def gemini_analyze(session, report, content, other_reports=None, company_profile=None):
     if not GEMINI_API_KEY: return None
+
+    other_ctx = ""
+    if other_reports:
+        other_ctx = "\n\nדיווחים אחרונים נוספים (כבר פורסמו!):\n" + "\n".join([f"  • {r}" for r in other_reports])
+
+    profile_ctx = ""
+    if company_profile:
+        profile_ctx = f"\n\nפרופיל החברה:\n{company_profile}"
+
     prompt = f"""אתה אנליסט בורסאי מומחה. נתח דיווח מהבורסה.
 
 חברה: {report['company']}
 כותרת: {report['title']}
 סוג: {report.get('form_type','?')}
 תאריך: {report.get('date','?')}
-הערות: {report.get('comment','')}
+{profile_ctx}
 
-{f"תוכן:{chr(10)}{content[:3000]}" if content else "(אין תוכן — נתח על סמך הכותרת)"}
+{f"תוכן:{chr(10)}{content[:3000]}" if content else "(אין תוכן)"}
+{other_ctx}
 
-חשוב: תן גם תוכן ההודעה (מה כתוב בדיווח) וגם ניתוח משמעות ברמה גבוהה (מה זה אומר למשקיע).
+חשוב:
+- תן תוכן הדיווח + ניתוח משמעות ברמה גבוהה
+- השתמש בפרופיל החברה כדי לתת הקשר נכון
+- אל תציע לצפות לדיווח שכבר פורסם
 
 JSON בלבד (בלי backticks):
 {{
@@ -405,24 +533,37 @@ JSON בלבד (בלי backticks):
         logger.error(f"Gemini error: {e}"); return None
 
 
-async def claude_analyze(session, report, content):
+async def claude_analyze(session, report, content, other_reports=None, company_profile=None):
     if not ANTHROPIC_API_KEY: return None
+
+    other_ctx = ""
+    if other_reports:
+        other_ctx = "\n\n══ דיווחים אחרונים נוספים של אותה חברה (כבר פורסמו!) ══\n" + "\n".join([f"  • {r}" for r in other_reports])
+
+    profile_ctx = ""
+    if company_profile:
+        profile_ctx = f"\n\n══ פרופיל החברה (מבוסס על דוחות כספיים אחרונים) ══\n{company_profile}"
+
     prompt = f"""[{now_s()}]
 
 אתה אנליסט השקעות בכיר בבית השקעות מוביל בישראל, עם 15+ שנות ניסיון בשוק ההון הישראלי.
-אתה מנתח דיווח שפורסם במערכת מאי"ה (מערכת ההודעות של הבורסה לניירות ערך).
+אתה מנתח דיווח שפורסם במערכת מאי"ה.
 
 ══ פרטי הדיווח ══
 חברה: {report['company']}
 כותרת: {report['title']}
 סוג: {report.get('form_type','?')}
 תאריך: {report.get('date','?')}
+{profile_ctx}
 
 ══ תוכן הדיווח ══
 {content[:4500] if content else "(אין תוכן מלא זמין)"}
+{other_ctx}
 
 ══ הנחיות קריטיות ══
-{"⚠️ אין תוכן מלא. אל תמציא נתונים! כתוב רק: 'לא ניתן לנתח — אין גישה לתוכן המלא של הדיווח. יש לעיין בקישור.' ותן רק הערכה כללית קצרה על סמך הכותרת." if not content else "יש לך את התוכן המלא. נתח אותו לעומק."}
+{"⚠️ אין תוכן מלא. אל תמציא נתונים! תן הערכה קצרה על סמך הכותרת והפרופיל." if not content else "יש לך את התוכן המלא. נתח אותו לעומק."}
+⚠️ שים לב לרשימת הדיווחים האחרונים! אל תכתוב "יש לצפות לדיווח" אם הוא כבר פורסם.
+⚠️ השתמש בפרופיל החברה כדי לתת ניתוח בהקשר הנכון — אתה מכיר את החברה.
 
 ══ הנחיות ══
 נתח כאנליסט מקצועי ברמה הגבוהה ביותר:
@@ -490,6 +631,8 @@ class State:
         self.gemini_today = 0
         self.claude_today = 0
         self.day = ""
+        self.profiles = {}  # company_name → profile text
+        self.profiles_date = ""  # when profiles were last built
         self._load()
 
     def _load(self):
@@ -501,6 +644,8 @@ class State:
                 self.gemini_today = s.get("gemini_today", 0)
                 self.claude_today = s.get("claude_today", 0)
                 self.day = s.get("day", "")
+                self.profiles = s.get("profiles", {})
+                self.profiles_date = s.get("profiles_date", "")
             except: pass
 
     def save(self):
@@ -508,7 +653,8 @@ class State:
             os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
             json.dump({"seen": self.seen[-1000:], "scan_count": self.scan_count,
                        "gemini_today": self.gemini_today, "claude_today": self.claude_today,
-                       "day": self.day}, open(STATE_FILE, "w"))
+                       "day": self.day, "profiles": self.profiles,
+                       "profiles_date": self.profiles_date}, open(STATE_FILE, "w"))
         except Exception as e:
             logger.error(f"Save: {e}")
 
@@ -519,6 +665,18 @@ class State:
         if d != self.day: self.gemini_today = 0; self.claude_today = 0; self.day = d
         if engine == "gemini": self.gemini_today += 1
         elif engine == "claude": self.claude_today += 1
+
+    def needs_profiles(self):
+        """Rebuild profiles weekly or if empty."""
+        if not self.profiles:
+            return True
+        if not self.profiles_date:
+            return True
+        try:
+            last = datetime.fromisoformat(self.profiles_date)
+            return now_u() - last > timedelta(days=7)
+        except:
+            return True
 
 
 # ═══════════════════════════════════════════════════════════
@@ -668,10 +826,17 @@ async def scan():
                             content = await fetch_report_content(s, rp)
                             logger.info(f"  Content: {len(content)} chars")
 
+                            # Build context: other recent reports from same company
+                            other_reports = [r["title"] + " (" + r.get("date","")[:10] + ")"
+                                             for r in reports if r.get("id") != rp.get("id")][:10]
+
+                            # Get company profile
+                            profile = state.profiles.get(company_name, "")
+
                             # Demo always uses Claude for best quality
                             if is_first and ANTHROPIC_API_KEY:
                                 logger.info(f"  DEMO mode — using Claude for analyst-level analysis")
-                                ai = await claude_analyze(s, rp, content)
+                                ai = await claude_analyze(s, rp, content, other_reports, profile)
                                 state.tick("claude")
                                 engine = "claude"
                             else:
@@ -680,12 +845,12 @@ async def scan():
                                 engine = "gemini"
 
                                 if GEMINI_API_KEY:
-                                    ai = await gemini_analyze(s, rp, content)
+                                    ai = await gemini_analyze(s, rp, content, other_reports, profile)
                                     state.tick("gemini")
 
                                 if not ai and ANTHROPIC_API_KEY:
                                     logger.info(f"  Gemini failed, trying Claude...")
-                                    ai = await claude_analyze(s, rp, content)
+                                    ai = await claude_analyze(s, rp, content, other_reports, profile)
                                     state.tick("claude")
                                     engine = "claude"
 
@@ -731,16 +896,54 @@ async def scan():
 async def main():
     global state, tg
 
-    # Reset state if requested (add RESET_STATE=1 in Railway, then remove after deploy)
+    # Reset options
     if os.getenv("RESET_STATE") == "1":
         if os.path.exists(STATE_FILE):
+            # Keep profiles, reset everything else
+            try:
+                old = json.load(open(STATE_FILE))
+                saved_profiles = old.get("profiles", {})
+                saved_profiles_date = old.get("profiles_date", "")
+            except:
+                saved_profiles, saved_profiles_date = {}, ""
             os.remove(STATE_FILE)
-            logger.info("🔄 State reset — will re-scan and send 1 demo")
+            logger.info("🔄 State reset (profiles preserved)")
+        else:
+            saved_profiles, saved_profiles_date = {}, ""
+    else:
+        saved_profiles, saved_profiles_date = None, None
+
+    if os.getenv("RESET_PROFILES") == "1":
+        saved_profiles, saved_profiles_date = {}, ""
+        logger.info("🔄 Profiles reset — will rebuild")
+
+    state, tg = State(), TG()
+
+    # Restore preserved profiles after reset
+    if saved_profiles is not None:
+        state.profiles = saved_profiles
+        state.profiles_date = saved_profiles_date
+        state.save()
 
     state, tg = State(), TG()
     logger.info(f"📊 Starting Maya Monitor v4 — {len(MAYA_IDS)} companies, {len(state.seen)} seen")
     logger.info(f"  GEMINI_API_KEY: {'SET (' + GEMINI_API_KEY[:8] + '...)' if GEMINI_API_KEY else 'MISSING'}")
     logger.info(f"  ANTHROPIC_API_KEY: {'SET (' + ANTHROPIC_API_KEY[:8] + '...)' if ANTHROPIC_API_KEY else 'MISSING'}")
+    logger.info(f"  Profiles: {len(state.profiles)}/{len(MAYA_IDS)}")
+
+    # Build company profiles if needed (weekly refresh)
+    if state.needs_profiles():
+        logger.info("🏗️ Building/refreshing company profiles...")
+        await tg.send("🏗️ בונה פרופילי חברות מדוחות כספיים... (פעם בשבוע, 2-3 דקות)")
+        async with aiohttp.ClientSession() as s:
+            profiles = await build_company_profiles(s)
+            state.profiles.update(profiles)
+            state.profiles_date = now_u().isoformat()
+            state.save()
+        await tg.send(f"✅ פרופילים נבנו: {len(state.profiles)}/{len(MAYA_IDS)} חברות")
+        logger.info(f"Profiles ready: {len(state.profiles)}")
+    else:
+        logger.info(f"Using cached profiles ({len(state.profiles)} companies, built {state.profiles_date[:10]})")
 
     await tg.startup(len(MAYA_IDS))
 
