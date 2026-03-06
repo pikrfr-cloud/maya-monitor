@@ -229,65 +229,126 @@ def parse_report(item, company_name, company_id):
 
 
 async def fetch_report_content(session, report):
-    """Get report content using headless browser (Playwright)."""
+    """Get report content — handles HTM, PDF links inside HTM, and direct PDFs."""
     report_id = report.get("id", "")
-    if not report_id:
+    if not report_id or not report_id.isdigit():
         return ""
 
-    url = f"https://maya.tase.co.il/reports/details/{report_id}"
-    logger.info(f"  Fetching report content: {url}")
+    rpt_num = int(report_id)
+    range_start = (rpt_num // 1000) * 1000 + 1
+    range_end = range_start + 999
+    content = ""
 
+    # Strategy 1: HTM file (may contain text OR a PDF link)
+    htm_url = f"https://mayafiles.tase.co.il/rhtm/{range_start}-{range_end}/H{report_id}.htm"
     try:
-        from playwright.async_api import async_playwright
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(url, wait_until="networkidle", timeout=30000)
-            # Wait for content to render
-            await page.wait_for_timeout(3000)
+        async with session.get(htm_url, timeout=aiohttp.ClientTimeout(total=15),
+                               headers={"User-Agent": "Mozilla/5.0 Chrome/121.0.0.0"}) as r:
+            if r.status == 200:
+                html = await r.text()
 
-            # Extract text content from the report
-            content = await page.evaluate("""() => {
-                // Try different selectors Maya might use
-                const selectors = [
-                    '.report-content', '.report-body', '.report-text',
-                    '.maya-report', '.document-content', '.filing-content',
-                    '[class*="report"]', '[class*="content"]',
-                    'article', '.main-content', '#content',
-                    '.ng-star-inserted'
-                ];
-                for (const sel of selectors) {
-                    const el = document.querySelector(sel);
-                    if (el && el.innerText && el.innerText.length > 100) {
-                        return el.innerText;
-                    }
-                }
-                // Fallback: get all visible text from body
-                return document.body.innerText;
-            }""")
+                # Check if HTM contains PDF links
+                pdf_links = re.findall(r'href=["\']([^"\']*\.pdf[^"\']*)["\']', html, re.IGNORECASE)
+                # Also check for rpdf links
+                pdf_links += re.findall(r'(https?://mayafiles\.tase\.co\.il/rpdf/[^"\'<>\s]+)', html)
+                # Also look for relative PDF paths
+                pdf_links += [f"https://mayafiles.tase.co.il{m}" for m in re.findall(r'(/rpdf/[^"\'<>\s]+\.pdf)', html)]
 
-            await browser.close()
+                if pdf_links:
+                    # Download and parse the PDF
+                    pdf_url = pdf_links[0]
+                    if not pdf_url.startswith("http"):
+                        pdf_url = f"https://mayafiles.tase.co.il{pdf_url}"
+                    logger.info(f"  📎 Found PDF link in HTM: {pdf_url}")
+                    pdf_text = await fetch_pdf_text(session, pdf_url)
+                    if pdf_text:
+                        content = pdf_text
+                        logger.info(f"  ✅ PDF content: {len(content)} chars")
 
-            if content and len(content) > 50:
-                # Clean up
-                content = content.strip()
-                # Remove navigation/footer noise
-                lines = content.split('\n')
-                # Keep lines that are actual content (not menu items)
-                good_lines = [l for l in lines if len(l.strip()) > 20]
-                content = '\n'.join(good_lines)
-                logger.info(f"  Content extracted: {len(content)} chars")
-                return content[:6000]
-            else:
-                logger.warning(f"  No content extracted from page")
+                # If no PDF or PDF failed, extract text from HTM itself
+                if not content:
+                    text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+                    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+                    text = re.sub(r'<[^>]+>', ' ', text)
+                    text = re.sub(r'&nbsp;', ' ', text)
+                    text = re.sub(r'&[a-z]+;', '', text)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    if len(text) > 50:
+                        content = text
+                        logger.info(f"  ✅ HTM text content: {len(content)} chars")
+    except Exception as e:
+        logger.debug(f"  HTM fetch: {e}")
+
+    # Strategy 2: Try direct PDF from archive
+    if not content:
+        for suffix in ["-00.pdf", "-01.pdf"]:
+            pdf_url = f"https://mayafiles.tase.co.il/rpdf/{range_start}-{range_end}/P{report_id}{suffix}"
+            pdf_text = await fetch_pdf_text(session, pdf_url)
+            if pdf_text:
+                content = pdf_text
+                logger.info(f"  ✅ Direct PDF: {len(content)} chars from {pdf_url}")
+                break
+
+    # Strategy 3: maya.tase.co.il/api/v1/reports/{id}
+    if not content:
+        try:
+            url = f"https://maya.tase.co.il/api/v1/reports/{report_id}"
+            async with session.get(url, headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 Chrome/121.0.0.0",
+                "Referer": "https://maya.tase.co.il/",
+            }, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if isinstance(data, dict):
+                        parts = []
+                        for field in ["title", "body", "content", "text", "description", "comment"]:
+                            val = data.get(field, "")
+                            if val and len(str(val)) > 10:
+                                parts.append(str(val))
+                        if parts:
+                            content = "\n".join(parts)
+                            logger.info(f"  ✅ API v1: {len(content)} chars")
+        except Exception as e:
+            logger.debug(f"  API v1: {e}")
+
+    return content[:6000]
+
+
+async def fetch_pdf_text(session, pdf_url):
+    """Download a PDF and extract text from it."""
+    try:
+        async with session.get(pdf_url, timeout=aiohttp.ClientTimeout(total=20),
+                               headers={"User-Agent": "Mozilla/5.0 Chrome/121.0.0.0"}) as r:
+            if r.status != 200:
+                return ""
+            ct = r.content_type or ""
+            if "pdf" not in ct and "octet" not in ct:
+                return ""
+            pdf_bytes = await r.read()
+            if len(pdf_bytes) < 100:
                 return ""
 
-    except ImportError:
-        logger.error("Playwright not installed! Run: pip install playwright && playwright install chromium")
-        return ""
+            # Parse PDF using PyPDF2
+            import io
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(io.BytesIO(pdf_bytes))
+                text_parts = []
+                for page in reader.pages[:30]:  # Max 30 pages
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(page_text)
+                text = "\n".join(text_parts)
+                if text and len(text) > 50:
+                    return text[:6000]
+            except ImportError:
+                logger.error("PyPDF2 not installed!")
+            except Exception as e:
+                logger.debug(f"  PDF parse error: {e}")
     except Exception as e:
-        logger.error(f"  Playwright error: {e}")
-        return ""
+        logger.debug(f"  PDF download error: {e}")
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════
